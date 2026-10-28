@@ -107,7 +107,15 @@ ros2 service call /mapping/save_artifacts std_srvs/srv/Trigger {}
 ```
 数据流：bag → mapping_node（适配）→ fast_lio（建图）→ mapping_node（汇总输出）
 
-### 不同参数对比
+### 完成的内容
+#### 三维建图
+接入 FAST-LIO（ROS 2）作为建图后端，mapping_node 作为适配层：把 Livox CustomMsg 转成 /mapping/custom_cloud、IMU 转成 /mapping/imu并进行了加速度单位修正  
+通过平均加速度计算旋转矩阵R，将倾斜的FAST-LIO系转为水平。
+#### 二维地图处理
+去除无效点，体素降采样，裁减掉了天花板以建立二维地图，进行边界与障碍的投影，栅格化发布
+#### rviz显示
+显示三维点云，二维栅格以及轨迹与朝向
+#### 不同参数对比
 voxel_size：体素降采样
 - 0.05：cleaned.pcd 点数充足，障碍格数充足，细节被保留。
 - 0.10：cleaned.pcd 点数下降，障碍格数下降，边界极不清晰。
