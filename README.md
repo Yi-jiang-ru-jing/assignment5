@@ -67,18 +67,16 @@ source install/setup.bash
 
 ## 在这里解释你的项目
 
-例如：
-
-如何编译：
+### 编译方式：
 
 ```bash
 # fast-lio
-
+colcon build --packages-select fast_lio
 # mid
 colcon build --packages-select mid360_mapping
 ```
 
-运行方式：
+### 运行方式：
 开启五个终端
 ```bash
 # 全部先运行（zsh终端）
@@ -92,9 +90,10 @@ ros2 run mid360_mapping mapping_node --ros-args \
 ros2 launch fast_lio mapping.launch.py use_sim_time:=true rviz:=false
 # Terminal C
 ros2 run mid360_mapping map_processor_node --ros-args \
--p use_sim_time:=true \
--p input_topic:=/Laser_map \
--p output_directory:=/home/mirroriver/Code/Robomaster/Train/assignment5-main/maps
+  --params-file src/mid360_mapping/config/map_processing.yaml \
+  -p use_sim_time:=true \
+  -p input_topic:=/Laser_map \
+  -p output_directory:=/home/mirroriver/Code/Robomaster/Train/assignment5-main/maps
 # Terminal D
 ros2 run rviz2 rviz2 -d $(ros2 pkg prefix mid360_mapping)/share/mid360_mapping/rviz/mapping.rviz \
 --ros-args -p use_sim_time:=true
@@ -108,4 +107,16 @@ ros2 service call /mapping/save_artifacts std_srvs/srv/Trigger {}
 ```
 数据流：bag → mapping_node（适配）→ fast_lio（建图）→ mapping_node（汇总输出）
 
-[截图]()
+### 不同参数对比
+voxel_size：体素降采样
+- 0.05：cleaned.pcd 点数充足，障碍格数充足，细节被保留。
+- 0.10：cleaned.pcd 点数下降，障碍格数下降，边界极不清晰。
+
+grid_resolution：栅格边长
+- 0.05：因为点云密度无法支撑该分辨率，障碍的可辨识度反而下降。
+- 0.10：轮廓可辨，辨识度较高。
+- 0.20：结构糊成一团团白/灰/黑的色块，细节被抹平丢失。
+
+### Rviz截图
+
+![rviz截图](docs/rviz.png)

@@ -4,9 +4,9 @@ map_processor_node:
     input_topic: /mapping/map
     map_frame: map
     output_directory: "/home/mirroriver/Code/Robomaster/Train/assignment5-main/maps"
-    voxel_size: 0.10
+    voxel_size: 0.05
     grid_resolution: 0.10
     obstacle_height_min: 0.15
-    obstacle_height_max: 4.0
+    obstacle_height_max: 6.0
 # Starting values only: determine suitable thresholds from the gravity-aligned map.
 # The scaffold validates startup values but does not apply filtering or rasterization yet.

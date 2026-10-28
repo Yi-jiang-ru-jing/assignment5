@@ -8,25 +8,27 @@
 #include <rclcpp/rclcpp.hpp>
 #include <limits>
 #include <algorithm>
-#include <pcl/io/pcd_io.h>
 #include <fstream>
 #include <filesystem>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <pcl/io/pcd_io.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/filters/filter.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/passthrough.h>
 #include <pcl/filters/statistical_outlier_removal.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/common/transforms.h>
 #include <mutex>
 #include <queue>
-#include <pcl_conversions/pcl_conversions.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_eigen/tf2_eigen.hpp>
-#include <pcl/common/transforms.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+
 
 class MapProcessorNode : public rclcpp::Node
 {
@@ -40,18 +42,15 @@ public:
     grid_resolution_ = declare_parameter<double>("grid_resolution", 0.10);
     // These are starting values to tune, not measured ground/obstacle thresholds.
     obstacle_height_min_ = declare_parameter<double>("obstacle_height_min", 0.15);
-    obstacle_height_max_ = declare_parameter<double>("obstacle_height_max", 3.0);
+    obstacle_height_max_ = declare_parameter<double>("obstacle_height_max", 6.0);
     ground_depth_min_ = declare_parameter<double>("ground_depth_min", -0.5);
     max_height_cut_ = declare_parameter<double>("max_height_cut", 8.0);
-    // 范围边界
-    //max_range_ = declare_parameter<double>("max_range", 0.0);
     // 去噪参数
-    mean_k_ = declare_parameter<int>("sor_mean_k", 50);
+    mean_k_ = declare_parameter<int>("sor_mean_k", 20);
     stddev_mul_thresh_ = declare_parameter<double>("sor_stddev_mul_thresh", 1.0);
     min_obstacle_points_ = declare_parameter<int>("min_obstacle_points", 1);
-    min_near_point = declare_parameter<int>("min_near_point", 0);
-    min_component_size_ = declare_parameter<int>("min_component_size", 10);
-    
+    min_component_size_ = declare_parameter<int>("min_component_size", 5);
+
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
     
@@ -62,6 +61,7 @@ public:
       throw std::invalid_argument("Invalid map-processing startup parameters");
     }
 
+    // 订阅
     cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
       input, rclcpp::SensorDataQoS(), [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
         ++received_;
@@ -81,24 +81,26 @@ public:
         remove_outlier_filter_.setMeanK(mean_k_);
         remove_outlier_filter_.setStddevMulThresh(stddev_mul_thresh_);
         remove_outlier_filter_.filter(temp_filtered);
-
+        
+        bool tf_ok = true;
         // 点云坐标转换
         if (msg->header.frame_id != map_frame_) {
           try {
             // 获取 map 到 camera_init 的变换
             geometry_msgs::msg::TransformStamped tf_msg = tf_buffer_->lookupTransform(
                 map_frame_, msg->header.frame_id, tf2::TimePointZero);
-            
             Eigen::Affine3d transform = tf2::transformToEigen(tf_msg);
-            
-            // 执行点云旋转
+            // 点云旋转
             pcl::transformPointCloud(temp_filtered, temp_filtered, transform.cast<float>());
-          } catch (tf2::TransformException &ex) {
+          }
+          catch (tf2::TransformException &ex) {
             RCLCPP_WARN(get_logger(), "Could not transform %s to %s: %s", 
                         msg->header.frame_id.c_str(), map_frame_.c_str(), ex.what());
-            return;
+            tf_ok = false;
           }
         }
+
+        if (!tf_ok) return;
 
         // 裁掉天花板
         pcl::PassThrough<pcl::PointXYZI> pass;
@@ -124,18 +126,19 @@ public:
           y_min = std::min(y_min, static_cast<double>(p.y));
           y_max = std::max(y_max, static_cast<double>(p.y));
         }
+
         // 空高度带保护
         if (x_min > x_max || y_min > y_max) return;
         double origin_x = floor(x_min / grid_resolution_) * grid_resolution_;
         double origin_y = floor(y_min / grid_resolution_) * grid_resolution_;
         int width = (int)(ceil((x_max - origin_x) / grid_resolution_));
         int height = (int)(ceil((y_max - origin_y) / grid_resolution_));
-        
         std::lock_guard<std::mutex> lock(mutex_);
         filtered_ = temp_filtered;
         grid_.data.assign(width * height, -1);
         grid_.header.frame_id = map_frame_;
         grid_.header.stamp = msg->header.stamp;
+        
         // 障碍物判定阈值
         std::vector<int> obstacle_counts(width * height, 0);
         // 标记障碍物区域
@@ -154,64 +157,32 @@ public:
             }
           }
         }
+
         // 标记空闲区域
         for (const auto& p : filtered_) {
           if (p.z >= obstacle_height_min_ || p.z < ground_depth_min_) continue;
-
           int ix = static_cast<int>(floor((p.x - origin_x) / grid_resolution_));
           int iy = static_cast<int>(floor((p.y - origin_y) / grid_resolution_));
           if(ix >= 0 && ix < width && iy >= 0 && iy < height){
-            // 如果该格尚未被标记为障碍物，则标为空闲
+            // 非障碍物，0
             if (grid_.data[iy * width + ix] != 100) {
               grid_.data[iy * width + ix] = 0; 
             }
           }
         }
-        
-        // 去除障碍物无效点
-      /*  std::vector<int8_t> grid_snapshot = grid_.data; 
-        
-        for (int y = 0; y < height; ++y) {
-          for (int x = 0; x < width; ++x) {
-            int idx = y * width + x;
-            if (grid_snapshot[idx] != 100) continue;
-            // 统计邻域内的障碍物数量
-            int neighbor_obstacles = 0;
-            for (int dy = -1; dy <= 1; ++dy) {
-              for (int dx = -1; dx <= 1; ++dx) {
-                if (dx == 0 && dy == 0) continue;
-                int nx = x + dx;
-                int ny = y + dy;
-                // 边界保护
-                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                  if (grid_snapshot[ny * width + nx] == 100) {
-                    neighbor_obstacles++;
-                  }
-                }
-              }
-            }
-            if (neighbor_obstacles <= min_near_point) {
-              grid_.data[idx] = -1; 
-            }
-          }
-        }*/
 
-        // 连通域过滤 (BFS)
-        std::vector<char> visited(width * height, 0); // 0 表示未访问
-        
+        // 连通域过滤
+        std::vector<char> visited(width * height, 0); // 0表示未访问
         for (int y = 0; y < height; ++y) {
           for (int x = 0; x < width; ++x) {
             int idx = y * width + x;
-            
-            // 障碍物且未访问，启动 BFS
+            // 障碍物且未访问，启用
             if (grid_.data[idx] == 100 && visited[idx] == 0) {
               std::queue<int> q;
               std::vector<int> current_component;
-              
               q.push(idx);
               visited[idx] = 1;
               current_component.push_back(idx);
-              
               // BFS 泛洪
               while (!q.empty()) {
                 int curr = q.front();
@@ -236,8 +207,7 @@ public:
                   }
                 }
               }
-              
-              // 如果收集到的格子数小于 min_component_size_，就把这些格子全部改成 -1 (未知)
+              // 小于 min_component_size_，标为-1
               if (current_component.size() < static_cast<size_t>(min_component_size_)) {
                 for (int comp_idx : current_component) {
                   grid_.data[comp_idx] = -1;
@@ -297,26 +267,25 @@ public:
             throw std::runtime_error("Failed to save PCD file to " + pcd_path);
           }
           // 导出PGM YAML
-          if (grid_.info.width > 0 && grid_.info.height > 0) {
+          if (grid_copy.info.width > 0 && grid_copy.info.height > 0) {
             std::string pgm_path = output_directory_ + "/map.pgm";
             std::string yaml_path = output_directory_ + "/map.yaml";
             // PGM
             std::ofstream pgm_file(pgm_path, std::ios::binary);
             if (!pgm_file) throw std::runtime_error("Failed to open PGM file for writing.");
-            pgm_file << "P5\n" << grid_.info.width << " " << grid_.info.height << "\n255\n";
+            pgm_file << "P5\n" << grid_copy.info.width << " " << grid_copy.info.height << "\n255\n";
             int width = static_cast<int>(grid_copy.info.width);
             int height = static_cast<int>(grid_copy.info.height);
             for (int iy = height - 1; iy >= 0; --iy) {
               for (int ix = 0; ix < width; ++ix) {
                 int8_t val = grid_copy.data[iy * width + ix];
                 unsigned char pixel;
-                if (val == 100) {
-                  pixel = 0;   // 障碍物：黑色
-                } else if (val == 0) {
-                  pixel = 254; // 空闲：白色
-                } else {
-                  pixel = 205; // 未知(-1)：灰色
-                }
+                if (val == 100)
+                  pixel = 0;
+                else if (val == 0)
+                  pixel = 254;
+                else
+                  pixel = 205;
                 pgm_file.write(reinterpret_cast<const char*>(&pixel), 1);
               }
             }
@@ -334,12 +303,13 @@ public:
             yaml_file << "occupied_thresh: 0.65\n";
             yaml_file << "free_thresh: 0.196\n";
             yaml_file.close();
-          } else {
-            RCLCPP_WARN(get_logger(), "Grid is empty, skipped PGM/YAML export.");
           }
+          else
+            RCLCPP_WARN(get_logger(), "Grid is empty, skipped PGM/YAML export.");
           response->success = true;
           response->message = "Successfully saved artifacts to " + output_directory_;
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception& e) {
           response->success = false;
           response->message = "Error occurred while saving artifacts: " + std::string(e.what());
         }
@@ -362,7 +332,6 @@ private:
   std::string output_directory_;
   int mean_k_;
   int min_obstacle_points_;
-  int min_near_point;
   int min_component_size_;
   double stddev_mul_thresh_;
   double voxel_size_;
@@ -371,11 +340,14 @@ private:
   double obstacle_height_max_;
   double ground_depth_min_;
   double max_height_cut_;
-  pcl::PointCloud<pcl::PointXYZI> filtered_in, filtered_;
+  double robot_radius_;
+  bool mark_path_free_;
+  pcl::PointCloud<pcl::PointXYZI> filtered_;
   pcl::VoxelGrid<pcl::PointXYZI> voxel_filter_;
   pcl::StatisticalOutlierRemoval<pcl::PointXYZI> remove_outlier_filter_;
   std::mutex mutex_ ;
   nav_msgs::msg::OccupancyGrid grid_;
+  std::vector<geometry_msgs::msg::Point> trajectory_;
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

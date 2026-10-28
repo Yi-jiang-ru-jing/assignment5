@@ -4,14 +4,14 @@
 #include <string>
 #include <cstring>
 #include <cmath>
-#include <rcl_interfaces/msg/parameter_descriptor.hpp>
-#include <pcl/io/pcd_io.h>
-#include <pcl_conversions/pcl_conversions.h>
-#include <sensor_msgs/point_cloud2_iterator.hpp>
-#include <pcl/common/transforms.h>
 #include <Eigen/Dense>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <pcl/io/pcd_io.h>
+#include <pcl/common/transforms.h>
+#include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/passthrough.h>
-
+#include <pcl_conversions/pcl_conversions.h>
 
 namespace mid360_mapping
 {
@@ -90,6 +90,7 @@ MappingNode::MappingNode() : Node("mapping_node"), map_cloud_(new pcl::PointClou
       // TODO: OK; Save the accumulated map to map_output_path and report the actual result.
       on_save_map(request, response);
     });
+  
   status_timer_ = create_wall_timer(std::chrono::seconds(5), [this]() {
     size_t map_size = map_cloud_ ? map_cloud_->size() : 0;
     RCLCPP_INFO(
@@ -135,8 +136,6 @@ void MappingNode::on_cloud(sensor_msgs::msg::PointCloud2::ConstSharedPtr message
   //(void)message;
   // TODO: Read actual point fields and units, including per-point acquisition times.
   // TODO: Connect to your chosen mapping backend; preserve sensor timestamps and frames.
-  std::string fields_list = pcl::getFieldsList(*message);
-
   int time_idx = pcl::getFieldIndex(*message, "timestamp");
   if (time_idx == -1) time_idx = pcl::getFieldIndex(*message, "time");
   if (time_idx == -1) time_idx = pcl::getFieldIndex(*message, "t");
@@ -151,27 +150,14 @@ void MappingNode::on_cloud(sensor_msgs::msg::PointCloud2::ConstSharedPtr message
   
   const uint8_t* data_ptr = message->data.data();
   rclcpp::Time base_stamp(message->header.stamp);
-  std::vector<std::pair<rclcpp::Time, Eigen::Vector3d>> points;
   pcl::PointCloud<pcl::PointXYZI> pcl_cloud;
-  points.reserve(num_points);
   pcl_cloud.reserve(num_points);
-  //sensor_msgs::PointCloud2ConstIterator<float> iter_x(*message, "x");
-  //sensor_msgs::PointCloud2ConstIterator<float> iter_y(*message, "y");
-  //sensor_msgs::PointCloud2ConstIterator<float> iter_z(*message, "z");
-  //sensor_msgs::PointCloud2ConstIterator<double> iter_time(*message, "timestamp");
-  //for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z, ++iter_time) {
-    //int64_t t = static_cast<int64_t>(*iter_time);
-    //const rclcpp::Time stamp = base_stamp + rclcpp::Duration(std::chrono::nanoseconds(t));
-    //points.emplace_back(stamp, Eigen::Vector3d(*iter_x, *iter_y, *iter_z));
-  //} 
-  //(void)points;
 
   if (time_idx == -1) {
     std::string fields_list = pcl::getFieldsList(*message);
     RCLCPP_WARN_ONCE(get_logger(), 
       "PointCloud2 has no time field. Motion distortion compensation degraded. Available fields: %s", 
       fields_list.c_str());
-
     for (uint32_t i = 0; i < num_points; ++i) {
       const uint8_t* pt_ptr = data_ptr + i * message->point_step;
       pcl::PointXYZI pt;
@@ -215,7 +201,6 @@ void MappingNode::on_cloud(sensor_msgs::msg::PointCloud2::ConstSharedPtr message
   else if (abs_t < 1e3) time_scale = 1e-3; // ms
   else if (abs_t < 1e6) time_scale = 1e-6; // us
   else time_scale = 1e-9; // ns
-
 
   RCLCPP_INFO_ONCE(get_logger(), "Detected time field '%s', scale %.1e to seconds.", 
                    message->fields[time_idx].name.c_str(), time_scale);
@@ -333,11 +318,11 @@ void MappingNode::on_imu(sensor_msgs::msg::Imu::ConstSharedPtr message)
       for (const auto& a : acc_buffer_) avg_acc += a;
       avg_acc /= acc_buffer_.size();
       
-      // 归一化 --u
+      // 归一化 得u
       Eigen::Vector3d u = avg_acc.normalized();
       Eigen::Vector3d z_axis(0, 0, 1);
       
-      // 计算把 u 转到 z_axis 的最小旋转 R
+      // u 到 z_axis 的最小旋转 R
       double cos_theta = u.dot(z_axis);
       if (cos_theta > 0.9999) {
         R_ = Eigen::Matrix3d::Identity();
@@ -358,7 +343,7 @@ void MappingNode::on_imu(sensor_msgs::msg::Imu::ConstSharedPtr message)
       geometry_msgs::msg::TransformStamped static_tf;
       static_tf.header.stamp = this->get_clock()->now();
       static_tf.header.frame_id = map_frame_;
-      static_tf.child_frame_id = "camera_init"; // FAST-LIO 的默认根坐标系
+      static_tf.child_frame_id = "camera_init";
       
       Eigen::Quaterniond q(R_);
       static_tf.transform.rotation.w = q.w();
@@ -408,11 +393,9 @@ void MappingNode::on_save_map(
     pcl::transformPointCloud(*snapshot, *snapshot, transform);
     RCLCPP_INFO(get_logger(), "Applied gravity alignment rotation to saved PCD.");
   }
-  else {
+  else 
     RCLCPP_WARN(get_logger(), "Rotation matrix R is not ready yet. Saving original (tilted) PCD.");
-  }
 
-  
   if (pcl::io::savePCDFileBinary(map_output_path_, *snapshot) == 0) {
     response->success = true;
     response->message = "Map saved successfully to " + map_output_path_;

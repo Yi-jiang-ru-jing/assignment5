@@ -3,19 +3,15 @@
 #include <pcl/point_types.h>
 #include <cstdint>
 #include <memory>
+#include <vector> 
+#include <Eigen/Geometry>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/duration.hpp>
-#include <rclcpp/generic_subscription.hpp>
-#include <rclcpp/serialized_message.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <std_srvs/srv/trigger.hpp>
-#include <deque>
-#include <optional>
-#include <vector> 
-#include <Eigen/Geometry>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -59,35 +55,21 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
   rclcpp::Publisher<livox_ros_driver2::msg::CustomMsg>::SharedPtr fastlio_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_points_pub_;
-
+  
   // 成员变量
   std::string map_frame_;
   std::string body_frame_;
   std::string map_output_path_;
   std::mutex map_mutex_;
   pcl::PointCloud<pcl::PointXYZI>::Ptr map_cloud_;
-  rclcpp::Time last_imu_time_;
+  rclcpp::Time lasted_imu_time_{0, 0, RCL_ROS_TIME};
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_service_;
   rclcpp::TimerBase::SharedPtr status_timer_;
-  
+   
   std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::shared_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
   std::vector<Eigen::Vector3d> acc_buffer_;
   Eigen::Matrix3d R_;
   bool R_ready_ = false;
-
-  struct ImuSample
-  {
-    rclcpp::Time stamp;
-    Eigen::Vector3d acc;   // m/s^2
-    Eigen::Vector3d gyro;  // rad/s
-    Eigen::Quaterniond orientation;
-    bool has_orientation;
-  };
-
-  rclcpp::Time lasted_imu_time_{0, 0, RCL_ROS_TIME};
-  size_t imu_dropped_{0};
-
-  
 };
 }  // namespace mid360_mapping
